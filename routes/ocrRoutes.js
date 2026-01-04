@@ -2,152 +2,156 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const path = require('path');
+const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
-const fs = require('fs');
 const FormDataNode = require('form-data');
 const { PDFDocument, rgb } = require('pdf-lib');
-const Document = require('../models/Document');
-const auth = require('../middleware/auth');
 const { Document: DocxDocument, Packer, Paragraph } = require('docx');
+const auth = require('../middleware/auth');
+const DocumentModel = require('../models/Document');
+
+// ======================== CONFIG ========================
+
 // Multer: temporary storage for uploaded files
 const upload = multer({ dest: 'storage/uploads/' });
 
 // Output directory for generated files
 const OUTPUT_DIR = path.join(__dirname, '../storage/outputs');
-if (!fs.existsSync(OUTPUT_DIR)) {
-  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-}
+if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
-// ML OCR Service URL (dummy or real FastAPI)
+// ML OCR Service URL
 const ML_OCR_URL = process.env.ML_SERVICE_URL || 'http://localhost:8001/ocr';
 
-// ======================== UPLOAD ROUTE ========================
+// ======================== UTILS ========================
+
+// Generate a safe PDF with automatic line breaks
+async function generatePDF(text) {
+  const pdfDoc = await PDFDocument.create();
+  let currentPage = pdfDoc.addPage([600, 800]); // Use 'let' to allow reassigning
+  const lines = text.match(/(.|[\r\n]){1,90}/g) || [];
+  let y = 750;
+
+  for (const line of lines) {
+    if (y < 50) {
+      currentPage = pdfDoc.addPage([600, 800]); // Correctly switch to the new page
+      y = 750;
+    }
+    currentPage.drawText(line.trim(), { x: 50, y, size: 12 });
+    y -= 14;
+  }
+  return await pdfDoc.save();
+}
+
+// Generate DOCX
+async function generateDOCX(text) {
+  const doc = new DocxDocument({
+    sections: [{ children: [new Paragraph(text)] }],
+  });
+  return await Packer.toBuffer(doc);
+}
+
+// ======================== ROUTES ========================
+
+// Upload multiple files
 router.post('/upload', auth, upload.array('files'), async (req, res) => {
   const files = req.files || [];
+  if (!files.length) return res.status(400).json({ message: 'No files uploaded' });
 
-  if (files.length === 0) {
-    return res.status(400).json({ message: 'No files uploaded' });
-  }
-
-  const results = [];
-
-  for (const file of files) {
-    const fileId = uuidv4();
-    const originalPath = file.path;
-
-    try {
-      if (!fs.existsSync(originalPath)) {
-        throw new Error('Temporary upload file missing');
-      }
-
-      // Use buffer instead of stream — fast and reliable on Windows
-      const fileBuffer = fs.readFileSync(originalPath);
-
-      const formData = new FormDataNode();
-      formData.append('files', fileBuffer, {
-        filename: file.originalname,
-        contentType: file.mimetype || 'application/octet-stream',
-      });
-
-      const mlResponse = await axios.post(ML_OCR_URL, formData, {
-        headers: formData.getHeaders(),
-        timeout: 30000,
-      });
-
-      const extractedText = 
-        mlResponse.data?.concatenated?.text ||
-        mlResponse.data?.results?.[0]?.text ||
-        mlResponse.data?.text ||
-        'No text extracted';
-
-      // Save to DB (user-specific)
-      const doc = await Document.create({
-        user: req.user.id,
-        originalFilename: file.originalname,
-        extractedText,
-        fileId,
-      });
-
+  const results = await Promise.allSettled(
+    files.map(async (file) => {
+      const fileId = uuidv4();
+      const originalPath = file.path;
       const basePath = path.join(OUTPUT_DIR, fileId);
 
-      // TXT — always generated (fast)
-      fs.writeFileSync(`${basePath}.txt`, extractedText);
+      try {
+        if (!fs.existsSync(originalPath)) throw new Error('Temporary file missing');
 
-      // PDF & DOCX — commented for speed during demo
-      // Uncomment when real model is ready and you want full exports
-    
-      const pdfDoc = await PDFDocument.create();
-      const page = pdfDoc.addPage([600, 800]);
-      page.drawText(extractedText, { x: 50, y: 750, size: 12 });
-      fs.writeFileSync(`${basePath}.pdf`, await pdfDoc.save());
+        const buffer = fs.readFileSync(originalPath);
+        const formData = new FormDataNode();
+        formData.append('files', buffer, {
+          filename: file.originalname,
+          contentType: file.mimetype || 'application/octet-stream',
+        });
 
-      const docx = new DocxDocument({
-        sections: [{ children: [new Paragraph(extractedText)] }],
-      });
-      fs.writeFileSync(`${basePath}.docx`, await Packer.toBuffer(docx));
-      
+        const mlResponse = await axios.post(ML_OCR_URL, formData, {
+          headers: formData.getHeaders(),
+          timeout: 30000,
+        });
 
-      results.push({
-        documentId: doc._id,
-        fileId,
-        originalFilename: file.originalname,
-        preview: extractedText.substring(0, 200) + (extractedText.length > 200 ? '...' : ''),
-        downloads: {
-          text: `/api/ocr/download/${fileId}/text`,
-          pdf: `/api/ocr/download/${fileId}/pdf`,
-          docx: `/api/ocr/download/${fileId}/docx`,
-        },
-      });
-    } catch (error) {
-      console.error(`OCR failed for ${file.originalname}:`, error.message);
-      results.push({
-        originalFilename: file.originalname,
-        error: error.response?.data?.detail || error.message || 'Processing failed',
-      });
-    } finally {
-      // Always clean up temporary file
-      if (fs.existsSync(originalPath)) {
-        fs.unlinkSync(originalPath);
+        const extractedText =
+          mlResponse.data?.concatenated?.text ||
+          mlResponse.data?.results?.[0]?.text ||
+          mlResponse.data?.text ||
+          'No text extracted';
+
+        // Save to DB
+        const doc = await DocumentModel.create({
+          user: req.user.id,
+          originalFilename: file.originalname,
+          extractedText,
+          fileId,
+        });
+
+        // TXT
+        fs.writeFileSync(`${basePath}.txt`, extractedText);
+
+        // PDF
+        fs.writeFileSync(`${basePath}.pdf`, await generatePDF(extractedText));
+
+        // DOCX
+        fs.writeFileSync(`${basePath}.docx`, await generateDOCX(extractedText));
+
+        return {
+          documentId: doc._id,
+          fileId,
+          originalFilename: file.originalname,
+          preview: extractedText.substring(0, 200) + (extractedText.length > 200 ? '...' : ''),
+          downloads: {
+            text: `/api/ocr/download/${fileId}/text`,
+            pdf: `/api/ocr/download/${fileId}/pdf`,
+            docx: `/api/ocr/download/${fileId}/docx`,
+          },
+        };
+      } catch (error) {
+        console.error(`OCR failed for ${file.originalname}:`, error.message);
+        return {
+          originalFilename: file.originalname,
+          error: error.response?.data?.detail || error.message || 'Processing failed',
+        };
+      } finally {
+        if (fs.existsSync(originalPath)) fs.unlinkSync(originalPath);
       }
-    }
-  }
+    })
+  );
 
   res.json({
     message: 'OCR processing complete',
-    results,
+    results: results.map(r => (r.status === 'fulfilled' ? r.value : { error: r.reason })),
   });
 });
 
-// ======================== DOWNLOAD ROUTE ========================
+// Download processed files
 router.get('/download/:fileId/:type', auth, async (req, res) => {
   const { fileId, type } = req.params;
   const validTypes = ['text', 'pdf', 'docx'];
-
-  if (!validTypes.includes(type)) {
-    return res.status(400).json({ message: 'Invalid file type' });
-  }
+  if (!validTypes.includes(type)) return res.status(400).json({ message: 'Invalid file type' });
 
   const ext = type === 'text' ? 'txt' : type;
   const filepath = path.join(OUTPUT_DIR, `${fileId}.${ext}`);
+  if (!fs.existsSync(filepath)) return res.status(404).json({ message: 'File not found' });
 
-  if (!fs.existsSync(filepath)) {
-    return res.status(404).json({ message: 'File not found' });
-  }
-
-  const doc = await Document.findOne({ fileId, user: req.user.id });
-  if (!doc) {
-    return res.status(403).json({ message: 'Unauthorized' });
-  }
+  const doc = await DocumentModel.findOne({ fileId, user: req.user.id });
+  if (!doc) return res.status(403).json({ message: 'Unauthorized' });
 
   const filename = `${path.parse(doc.originalFilename).name}.${ext}`;
   res.download(filepath, filename);
 });
 
-// ======================== HISTORY ROUTE ========================
+// Get user OCR history
 router.get('/history', auth, async (req, res) => {
   try {
-    const docs = await Document.find({ user: req.user.id })
+    const docs = await DocumentModel.find({ user: req.user.id })
       .sort({ createdAt: -1 })
       .limit(20)
       .select('originalFilename createdAt fileId extractedText')

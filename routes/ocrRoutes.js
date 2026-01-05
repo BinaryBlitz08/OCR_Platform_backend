@@ -11,9 +11,6 @@ const { Document: DocxDocument, Packer, Paragraph } = require('docx');
 const auth = require('../middleware/auth');
 const DocumentModel = require('../models/Document');
 
-// ======================== CONFIG ========================
-
-// Multer: temporary storage for uploaded files
 const upload = multer({ dest: 'storage/uploads/' });
 
 // Output directory for generated files

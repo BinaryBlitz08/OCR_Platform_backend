@@ -16,7 +16,7 @@ const upload = multer({ dest: 'storage/uploads/' });
 const OUTPUT_DIR = path.join(__dirname, '../storage/outputs');
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
-const ML_OCR_URL = process.env.ML_SERVICE_URL || 'http://localhost:8001/ocr';
+const ML_OCR_URL = process.env.ML_SERVICE_URL || 'http://localhost:8000/ocr';
 
 
 async function generatePDF(text) {

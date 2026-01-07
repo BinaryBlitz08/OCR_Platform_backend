@@ -13,16 +13,12 @@ const DocumentModel = require('../models/Document');
 
 const upload = multer({ dest: 'storage/uploads/' });
 
-// Output directory for generated files
 const OUTPUT_DIR = path.join(__dirname, '../storage/outputs');
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
-// ML OCR Service URL
 const ML_OCR_URL = process.env.ML_SERVICE_URL || 'http://localhost:8001/ocr';
 
-// ======================== UTILS ========================
 
-// Generate a safe PDF with automatic line breaks
 async function generatePDF(text) {
   const pdfDoc = await PDFDocument.create();
   let currentPage = pdfDoc.addPage([600, 800]); // Use 'let' to allow reassigning
@@ -48,9 +44,6 @@ async function generateDOCX(text) {
   return await Packer.toBuffer(doc);
 }
 
-// ======================== ROUTES ========================
-
-// Upload multiple files
 router.post('/upload', auth, upload.array('files'), async (req, res) => {
   const files = req.files || [];
   if (!files.length) return res.status(400).json({ message: 'No files uploaded' });
@@ -82,7 +75,6 @@ router.post('/upload', auth, upload.array('files'), async (req, res) => {
           mlResponse.data?.text ||
           'No text extracted';
 
-        // Save to DB
         const doc = await DocumentModel.create({
           user: req.user.id,
           originalFilename: file.originalname,
@@ -128,7 +120,6 @@ router.post('/upload', auth, upload.array('files'), async (req, res) => {
   });
 });
 
-// Download processed files
 router.get('/download/:fileId/:type', auth, async (req, res) => {
   const { fileId, type } = req.params;
   const validTypes = ['text', 'pdf', 'docx'];
@@ -145,7 +136,6 @@ router.get('/download/:fileId/:type', auth, async (req, res) => {
   res.download(filepath, filename);
 });
 
-// Get user OCR history
 router.get('/history', auth, async (req, res) => {
   try {
     const docs = await DocumentModel.find({ user: req.user.id })

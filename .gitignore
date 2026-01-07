@@ -1,6 +1,4 @@
-_pycache_/
-.env
 
+.env
 node_modules/
 /storage
-
